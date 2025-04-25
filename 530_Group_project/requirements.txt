@@ -5,3 +5,4 @@ numpy
 seaborn
 statsmodels
 scikit-learn
+google-generativeai
