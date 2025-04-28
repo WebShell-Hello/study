@@ -1,3 +1,8 @@
+
+import io
+import base64
+import google.generativeai as genai
+from PIL import Image
 import pandas as pd
 import matplotlib.pyplot as plt
 import numpy as np
@@ -14,7 +19,7 @@ import os
 
 
 # 上传的文件会保存在执行下面语句的目录
-# streamlit run /Users/mankakiu/Documents/Python_AI_Project/530_Group_project/2008\ Global\ Financial\ Crisis\ \&\ 2022\ Energy\ \&\ Inflation\ Crisis
+# streamlit run ./2008GlobalFinancialCrisis_\&_2022EnergyInflationCrisis.py
 
 
 class GrangerCausalityAnalyzer:
