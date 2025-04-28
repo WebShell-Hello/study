@@ -12,385 +12,10 @@ from sklearn.metrics import mean_squared_error
 import streamlit as st
 import os
 
-import io
-import base64
-import google.generativeai as genai
-from PIL import Image
-
-
-
 
 # 上传的文件会保存在执行下面语句的目录
-# streamlit run /Users/mankakiu/PycharmProjects/study/530_Group_project/2008\ Global\ Financial\ Crisis\ \&\ 2022\ Energy\ \&\ Inflation\ Crisis.py
+# streamlit run /Users/mankakiu/Documents/Python_AI_Project/530_Group_project/2008\ Global\ Financial\ Crisis\ \&\ 2022\ Energy\ \&\ Inflation\ Crisis
 
-def upload():
-    st.title("Upload data")
-    # 多文件上传
-    uploaded_files = st.file_uploader("Please select one or more files to upload", type=["csv"], accept_multiple_files=True)
-    # 保存每个文件
-    if uploaded_files:
-        save_dir = "./data"
-        os.makedirs(save_dir, exist_ok=True)  # 确保保存目录存在
-        for uploaded_file in uploaded_files:
-            filename = uploaded_file.name
-            save_path = os.path.join(save_dir, filename)
-            # 写入文件
-            with open(save_path, "wb") as f:
-                f.write(uploaded_file.getbuffer())
-        st.success(f"✅ Saved {len(uploaded_files)} file")
-
-def detect_date_column(df: pd.DataFrame) -> str:
-    """
-    Automatically detects the column in the DataFrame that contains date-like information,
-    including quarterly data in the format "YYYY Qx".
-
-    Parameters:
-        df (pd.DataFrame): The DataFrame to search for date columns.
-
-    Returns:
-        str: The name of the detected date column, or None if no date column is found.
-    """
-    for column in df.columns:
-        try:
-            # Convert column to string if it's not already a string type
-            if df[column].dtype != 'O':  # Not object type (string)
-                df[column] = df[column].astype(str)
-
-            # Check if column values are in "YYYY Qx" format (e.g., "2021 Q1")
-            if df[column].str.contains(r'\d{4} Q[1-4]', na=False).any():
-                return column  # Return the column name if it contains "YYYY Qx" format
-
-            # Try to convert the column to datetime for standard date formats
-            pd.to_datetime(df[column], errors='raise')
-            return column  # Return the column name if it's a valid date column
-        except (ValueError, TypeError):
-            continue
-    return None  # Return None if no valid date column is found
-
-def convert_quarter_to_date(quarter_str: str) -> pd.Timestamp:
-    """
-    Converts a quarterly string (e.g., "2021 Q1") to the corresponding date (e.g., "2021-01-01").
-    This function is flexible and can work with any quarterly string containing "YYYY Qx".
-
-    Parameters:
-        quarter_str (str): The quarterly string (e.g., "2021 Q1").
-
-    Returns:
-        pd.Timestamp: The corresponding datetime object (e.g., "2021-01-01").
-    """
-    # Split the string into year and quarter parts
-    parts = quarter_str.split(" Q")
-    if len(parts) == 2:
-        year, quarter = parts
-        # Handle the case where the string contains a valid year and quarter
-        try:
-            year = int(year)
-            quarter = int(quarter)
-            # Map quarters to the first month of each quarter
-            quarter_months = {1: 1, 2: 4, 3: 7, 4: 10}
-            if quarter in quarter_months:
-                month = quarter_months[quarter]
-                return pd.to_datetime(f"{year}-{month:02d}-01")
-        except ValueError:
-            pass  # If parsing fails, return NaT (could be invalid data)
-    return pd.NaT  # Return NaT if the input string is not in a valid "YYYY Qx" format
-
-def clean_dataset(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Cleans a DataFrame by stripping column names and converting date columns to datetime format.
-    If a column is detected as a date, it is renamed to 'Date'.
-
-    Parameters:
-        df (pd.DataFrame): The input DataFrame.
-
-    Returns:
-        pd.DataFrame: The cleaned DataFrame.
-    """
-    # Clean column names (remove leading/trailing spaces)
-    df.columns = df.columns.str.strip()
-
-    date_column = detect_date_column(df)
-
-    if date_column:
-        # Check if the column contains quarterly-like data (e.g., "YYYY Qx")
-        if df[date_column].dtype == object and df[date_column].str.contains(r'\d{4} Q[1-4]', na=False).any():
-            # Convert the "YYYY Qx" format to datetime dynamically
-            df[date_column] = df[date_column].apply(convert_quarter_to_date)
-        else:
-            # For standard date formats, convert to datetime
-            df[date_column] = pd.to_datetime(df[date_column], errors="coerce")
-
-        # Rename the date column to 'Date'
-        df.rename(columns={date_column: 'Date'}, inplace=True)
-
-    return df
-
-def load_dataset(folder_path: str = "data", crisis_years: list = []) -> dict:
-    """
-    Loads all CSV datasets from a specified folder, applies cleaning operations,
-    and splits them based on specified crisis years.
-
-    Parameters:
-        folder_path (str): The path to the folder containing CSV files. Defaults to "data".
-        crisis_years (list): List of years representing the crisis periods (e.g., [2008, 2022]).
-
-    Returns:
-        dict: A dictionary where the keys are crisis years and the values
-              are lists of tuples: (file_name, DataFrame)
-    """
-    crisis_data = {year: [] for year in crisis_years}
-
-    for file_name in os.listdir(folder_path):
-        if file_name.endswith(".csv"):
-            file_path = os.path.join(folder_path, file_name)
-            df = pd.read_csv(file_path)
-
-            df = clean_dataset(df)
-            date_column = detect_date_column(df)
-
-            if date_column:
-                df[date_column] = pd.to_datetime(df[date_column], errors='coerce')
-                df["Year"] = df[date_column].dt.year
-
-                unique_years = df["Year"].unique()
-                for year in crisis_years:
-                    if year in unique_years:
-                        crisis_data[year].append((file_name, df))  # 保存文件名和 DataFrame
-
-                df.drop(columns=["Year"], inplace=True)
-
-    return crisis_data
-
-def normalisation(df, normalization_type='z-score', columns=None):
-    """
-    Normalizes the numeric columns of a DataFrame using the specified normalization method.
-
-    Args:
-    - df (pd.DataFrame): The DataFrame to normalize.
-    - normalization_type (str): The type of normalization to apply. Options are 'z-score' or 'min-max'. Default is 'z-score'.
-    - columns (list or None): List of column names to normalize. If None, normalizes all numeric columns.
-
-    Returns:
-    - pd.DataFrame: DataFrame with normalized values.
-    """
-    # Select numeric columns
-    numeric_columns = df.select_dtypes(include=['number']).columns.tolist()
-
-    if columns is not None:
-        # Use provided columns, ensuring they are numeric
-        numeric_columns = [col for col in columns if col in numeric_columns]
-
-    if len(numeric_columns) == 0:
-        raise ValueError("No numeric columns to normalize in the provided DataFrame.")
-
-    # Select the normalization method
-    if normalization_type == 'z-score':
-        scaler = StandardScaler()
-    elif normalization_type == 'min-max':
-        scaler = MinMaxScaler()
-    else:
-        raise ValueError(f"Unknown normalization type: {normalization_type}. Supported types are 'z-score' and 'min-max'.")
-
-    # Apply the scaler to the numeric columns
-    normalized_data = scaler.fit_transform(df[numeric_columns])
-
-    # Convert the normalized data back to a DataFrame
-    normalized_df = df.copy()
-    normalized_df[numeric_columns] = normalized_data
-
-    return normalized_df
-
-def adjust_column_for_periods(df: pd.DataFrame, periods: list):
-    """
-    Adjusts specified columns in a DataFrame based on multiple periods with varying start/end dates and values.
-
-    Args:
-    - df (pd.DataFrame): The DataFrame containing the data.
-    - periods (list): A list of dictionaries, where each dictionary contains:
-        - 'start': start date of the period (str or datetime)
-        - 'end': end date of the period (str or datetime)
-        - 'column': the name of the column to adjust (str)
-        - 'value': the adjustment value to apply during the period (int, float, or str)
-
-    Returns:
-    - pd.DataFrame: The adjusted DataFrame.
-    """
-    # Copy the original DataFrame to avoid modifying the input DataFrame directly
-    adjusted_df = df.copy()
-
-    for period in periods:
-        # Convert start and end dates to datetime
-        start_date = pd.to_datetime(period['start'])
-        end_date = pd.to_datetime(period['end'])
-
-        # Check if the column exists in the DataFrame
-        column = period['column']
-        if column not in adjusted_df.columns:
-            raise ValueError(f"Column '{column}' not found in the DataFrame.")
-
-        # Apply the adjustment based on the period
-        adjusted_df.loc[
-            (adjusted_df['Date'] >= start_date) &
-            (adjusted_df['Date'] <= end_date),
-            column
-        ] = period['value']
-
-    return adjusted_df
-
-def preprocess_data(df: pd.DataFrame, freq: str = 'MS', method: str = 'ffill') -> pd.DataFrame:
-    """
-    Preprocesses a DataFrame by converting date formats and resampling it to a given frequency.
-
-    This version supports various types of date formats and resampling methods.
-
-    Parameters:
-        df (pd.DataFrame): The DataFrame containing the data.
-        freq (str): The resampling frequency. Default is 'MS' (monthly start).
-                    Other options include 'D' (daily), 'M' (monthly), 'Y' (yearly), etc.
-        method (str): Method for filling missing data during resampling. Default is 'ffill' (forward fill).
-                      Other options: 'bfill' (backward fill), 'pad' (pad), 'nearest', etc.
-
-    Returns:
-        pd.DataFrame: Preprocessed DataFrame with resampled data.
-    """
-    df = df.dropna(subset=['Date'])
-
-    df_resampled = df.set_index('Date').resample(freq).apply(method).reset_index()
-
-    return df_resampled
-
-def merge_dataframes_on_date(*dfs):
-    """
-    Merges multiple dataframes on the 'Date' column.
-
-    Parameters:
-        *dfs: Multiple DataFrames to merge.
-
-    Returns:
-        pd.DataFrame: A single merged DataFrame on the 'Date' column.
-    """
-    # Preprocess each DataFrame before merging
-    processed_dfs = [preprocess_data(df.copy()) for df in dfs]
-
-    # Merge DataFrames on 'Date'
-    merged_df = processed_dfs[0]
-    for df in processed_dfs[1:]:
-        merged_df = pd.merge(merged_df, df, on='Date', how='inner')
-
-    return merged_df
-
-def filter_target_column(all_dfs, crisis_year, target_column):
-    """
-    Filters each DataFrame in the all_dfs list for a given 'target_column' and 'Date' column.
-
-    Parameters:
-        all_dfs (list): List of DataFrames to filter.
-        crisis_year (str): The year or key indicating which group of DataFrames to filter.
-        target_column (str): The column to filter along with 'Date'.
-
-    Returns:
-        None: Modifies the DataFrames in place.
-    """
-    # Loop through each DataFrame in the selected crisis_year
-    for i, df in enumerate(all_dfs[crisis_year]):
-        if target_column in df.columns:
-            # Filter the DataFrame to only include 'Date' and the target column
-            df_filtered = df[['Date', target_column]].copy()
-
-            # Optionally, assign it back to the list to modify in place
-            all_dfs[crisis_year][i] = df_filtered
-
-
-def plotting(
-        df: pd.DataFrame,
-        file_name: str = " ",
-        step_column: str = " ",
-        x_label: str = None,
-        y_label: str = None,
-        annotation: dict = None,
-        highlight: list = None
-):
-    """
-    适配Streamlit的绘图函数，支持事件标注和高亮周期
-
-    Parameters:
-        df (pd.DataFrame): 输入数据
-        file_name (str): 数据集文件名（用于标题）
-        step_column (str): 绘制为阶梯图的列名
-        x_label (str): X轴标签
-        y_label (str): Y轴标签
-        annotation (dict): 事件标注，格式为 {"Event Name": ("YYYY-MM-DD", with_line)}
-        highlight (list): 高亮周期，格式为 [(start_date, end_date, price_level, label, color), ...]
-
-    Returns:
-        matplotlib.figure.Figure: 绘制的图形对象
-    """
-    # 自动检测日期列
-    date_col = None
-    for col in df.columns:
-        if pd.api.types.is_datetime64_any_dtype(df[col]):
-            date_col = col
-            break
-
-    if date_col is None:
-        raise ValueError("未检测到日期列，请确保包含datetime类型列")
-
-    # 设置默认标题
-    title = f"{file_name.removesuffix('.csv')} - Time Series Analysis"
-
-    # 创建图形对象
-    fig, ax1 = plt.subplots(figsize=(15, 8))
-    colors = ['b', 'g', 'r', 'c', 'm', 'y', 'k']
-
-    # 绘制主数据
-    for i, column in enumerate(df.columns[df.columns != date_col]):
-        line_style = '-'
-        marker_style = 'o'
-
-        if step_column == column:
-            ax1.step(df[date_col], df[step_column], where='post',
-                     color=colors[i % len(colors)], linewidth=2,
-                     label=f'{step_column} (Step)')
-        else:
-            ax1.plot(df[date_col], df[column], linestyle=line_style, marker=marker_style,
-                     linewidth=2, markersize=6, color=colors[i % len(colors)], label=column)
-
-    # 绘制高亮周期（柱状图）
-    if highlight:
-        for start, end, price, label, color in highlight:
-            width = (end - start).days
-            middle = start + (end - start) / 2
-            ax1.bar(x=start, height=price, width=width, color=color, alpha=0.2, align='edge', label=label)
-            # 添加标签
-            ax1.annotate(label, xy=(middle, price), xytext=(middle, price + 200),
-                         arrowprops=dict(arrowstyle='->', color=color), color=color, fontsize=12, ha='center')
-
-    # 绘制事件标注
-    if annotation:
-        y_max = df.select_dtypes(include=['number']).max().max()  # 获取数据最大值
-        for event_name, (event_date, with_line) in annotation.items():
-            event_date = pd.to_datetime(event_date)
-            # 绘制垂直线（如果需要）
-            if with_line:
-                ax1.axvline(x=event_date, color='red', linestyle='-', linewidth=2, label=event_name)
-            # 添加事件标注
-            y_position = y_max - (200 if with_line else 100)
-            ax1.annotate(event_name,
-                         xy=(event_date, y_position),
-                         xytext=(event_date + pd.DateOffset(days=150), y_position + 200),
-                         fontsize=12, color='red',
-                         ha='center',
-                         arrowprops=dict(arrowstyle='->', color='blue' if not with_line else 'red'))
-
-    # 设置标签和标题
-    ax1.set_xlabel(x_label or date_col)
-    ax1.set_ylabel(y_label or "Value")
-    ax1.set_title(title)
-    plt.xticks(rotation=45)
-    plt.legend()
-    plt.tight_layout()
-
-    return fig
 
 class GrangerCausalityAnalyzer:
     def __init__(self, data, maxlag=2, adf_significance=0.05, causality_significance=0.05):
@@ -639,6 +264,356 @@ class TimeSeriesRegression:
         self.plot_residuals()  # 绘制残差图
         st.pyplot(plt.gcf())  # 显示当前图形
         plt.clf()  # 清除图形
+#----------------------------------------------------------------------------------------------------------------------
+def upload():
+    st.title("Upload data")
+    # 多文件上传
+    uploaded_files = st.file_uploader("Please select one or more files to upload", type=["csv"], accept_multiple_files=True)
+    # 保存每个文件
+    if uploaded_files:
+        save_dir = "./data"
+        os.makedirs(save_dir, exist_ok=True)  # 确保保存目录存在
+        for uploaded_file in uploaded_files:
+            filename = uploaded_file.name
+            save_path = os.path.join(save_dir, filename)
+            # 写入文件
+            with open(save_path, "wb") as f:
+                f.write(uploaded_file.getbuffer())
+        st.success(f"✅ Saved {len(uploaded_files)} file")
+
+def detect_date_column(df: pd.DataFrame) -> str:
+    """
+    Automatically detects the column in the DataFrame that contains date-like information,
+    including quarterly data in the format "YYYY Qx".
+
+    Parameters:
+        df (pd.DataFrame): The DataFrame to search for date columns.
+
+    Returns:
+        str: The name of the detected date column, or None if no date column is found.
+    """
+    for column in df.columns:
+        try:
+            # Convert column to string if it's not already a string type
+            if df[column].dtype != 'O':  # Not object type (string)
+                df[column] = df[column].astype(str)
+
+            # Check if column values are in "YYYY Qx" format (e.g., "2021 Q1")
+            if df[column].str.contains(r'\d{4} Q[1-4]', na=False).any():
+                return column  # Return the column name if it contains "YYYY Qx" format
+
+            # Try to convert the column to datetime for standard date formats
+            pd.to_datetime(df[column], errors='raise')
+            return column  # Return the column name if it's a valid date column
+        except (ValueError, TypeError):
+            continue
+    return None  # Return None if no valid date column is found
+
+def convert_quarter_to_date(quarter_str: str) -> pd.Timestamp:
+    """
+    Converts a quarterly string (e.g., "2021 Q1") to the corresponding date (e.g., "2021-01-01").
+    This function is flexible and can work with any quarterly string containing "YYYY Qx".
+
+    Parameters:
+        quarter_str (str): The quarterly string (e.g., "2021 Q1").
+
+    Returns:
+        pd.Timestamp: The corresponding datetime object (e.g., "2021-01-01").
+    """
+    # Split the string into year and quarter parts
+    parts = quarter_str.split(" Q")
+    if len(parts) == 2:
+        year, quarter = parts
+        # Handle the case where the string contains a valid year and quarter
+        try:
+            year = int(year)
+            quarter = int(quarter)
+            # Map quarters to the first month of each quarter
+            quarter_months = {1: 1, 2: 4, 3: 7, 4: 10}
+            if quarter in quarter_months:
+                month = quarter_months[quarter]
+                return pd.to_datetime(f"{year}-{month:02d}-01")
+        except ValueError:
+            pass  # If parsing fails, return NaT (could be invalid data)
+    return pd.NaT  # Return NaT if the input string is not in a valid "YYYY Qx" format
+
+def clean_dataset(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Cleans a DataFrame by stripping column names and converting date columns to datetime format.
+    If a column is detected as a date, it is renamed to 'Date'.
+
+    Parameters:
+        df (pd.DataFrame): The input DataFrame.
+
+    Returns:
+        pd.DataFrame: The cleaned DataFrame.
+    """
+    # Clean column names (remove leading/trailing spaces)
+    df.columns = df.columns.str.strip()
+
+    date_column = detect_date_column(df)
+
+    if date_column:
+        # Check if the column contains quarterly-like data (e.g., "YYYY Qx")
+        if df[date_column].dtype == object and df[date_column].str.contains(r'\d{4} Q[1-4]', na=False).any():
+            # Convert the "YYYY Qx" format to datetime dynamically
+            df[date_column] = df[date_column].apply(convert_quarter_to_date)
+        else:
+            # For standard date formats, convert to datetime
+            df[date_column] = pd.to_datetime(df[date_column], errors="coerce")
+
+        # Rename the date column to 'Date'
+        df.rename(columns={date_column: 'Date'}, inplace=True)
+
+    return df
+
+def load_dataset(folder_path: str = "data", crisis_years: list = []) -> dict:
+    crisis_data = {year: [] for year in crisis_years}
+
+    for file_name in os.listdir(folder_path):
+        if file_name.endswith(".csv"):
+            file_path = os.path.join(folder_path, file_name)
+            df = pd.read_csv(file_path)
+
+            df = clean_dataset(df)
+            date_column = detect_date_column(df)
+
+            if date_column:
+                df[date_column] = pd.to_datetime(df[date_column], errors='coerce')
+                df["Year"] = df[date_column].dt.year
+
+                unique_years = df["Year"].unique()
+                for year in crisis_years:
+                    if year in unique_years:
+                        crisis_data[year].append((file_name, df))  # 保存文件名和 DataFrame
+
+                df.drop(columns=["Year"], inplace=True)
+
+    return crisis_data
+
+def normalisation(df, normalization_type='z-score', columns=None):
+    """
+    Normalizes the numeric columns of a DataFrame using the specified normalization method.
+
+    Args:
+    - df (pd.DataFrame): The DataFrame to normalize.
+    - normalization_type (str): The type of normalization to apply. Options are 'z-score' or 'min-max'. Default is 'z-score'.
+    - columns (list or None): List of column names to normalize. If None, normalizes all numeric columns.
+
+    Returns:
+    - pd.DataFrame: DataFrame with normalized values.
+    """
+    # Select numeric columns
+    numeric_columns = df.select_dtypes(include=['number']).columns.tolist()
+
+    if columns is not None:
+        # Use provided columns, ensuring they are numeric
+        numeric_columns = [col for col in columns if col in numeric_columns]
+
+    if len(numeric_columns) == 0:
+        raise ValueError("No numeric columns to normalize in the provided DataFrame.")
+
+    # Select the normalization method
+    if normalization_type == 'z-score':
+        scaler = StandardScaler()
+    elif normalization_type == 'min-max':
+        scaler = MinMaxScaler()
+    else:
+        raise ValueError(f"Unknown normalization type: {normalization_type}. Supported types are 'z-score' and 'min-max'.")
+
+    # Apply the scaler to the numeric columns
+    normalized_data = scaler.fit_transform(df[numeric_columns])
+
+    # Convert the normalized data back to a DataFrame
+    normalized_df = df.copy()
+    normalized_df[numeric_columns] = normalized_data
+
+    return normalized_df
+
+def adjust_column_for_periods(df: pd.DataFrame, periods: list):
+    """
+    Adjusts specified columns in a DataFrame based on multiple periods with varying start/end dates and values.
+
+    Args:
+    - df (pd.DataFrame): The DataFrame containing the data.
+    - periods (list): A list of dictionaries, where each dictionary contains:
+        - 'start': start date of the period (str or datetime)
+        - 'end': end date of the period (str or datetime)
+        - 'column': the name of the column to adjust (str)
+        - 'value': the adjustment value to apply during the period (int, float, or str)
+
+    Returns:
+    - pd.DataFrame: The adjusted DataFrame.
+    """
+    # Copy the original DataFrame to avoid modifying the input DataFrame directly
+    adjusted_df = df.copy()
+
+    for period in periods:
+        # Convert start and end dates to datetime
+        start_date = pd.to_datetime(period['start'])
+        end_date = pd.to_datetime(period['end'])
+
+        # Check if the column exists in the DataFrame
+        column = period['column']
+        if column not in adjusted_df.columns:
+            raise ValueError(f"Column '{column}' not found in the DataFrame.")
+
+        # Apply the adjustment based on the period
+        adjusted_df.loc[
+            (adjusted_df['Date'] >= start_date) &
+            (adjusted_df['Date'] <= end_date),
+            column
+        ] = period['value']
+
+    return adjusted_df
+
+def preprocess_data(df: pd.DataFrame, freq: str = 'MS', method: str = 'ffill') -> pd.DataFrame:
+    """
+    Preprocesses a DataFrame by converting date formats and resampling it to a given frequency.
+
+    This version supports various types of date formats and resampling methods.
+
+    Parameters:
+        df (pd.DataFrame): The DataFrame containing the data.
+        freq (str): The resampling frequency. Default is 'MS' (monthly start).
+                    Other options include 'D' (daily), 'M' (monthly), 'Y' (yearly), etc.
+        method (str): Method for filling missing data during resampling. Default is 'ffill' (forward fill).
+                      Other options: 'bfill' (backward fill), 'pad' (pad), 'nearest', etc.
+
+    Returns:
+        pd.DataFrame: Preprocessed DataFrame with resampled data.
+    """
+    df = df.dropna(subset=['Date'])
+
+    df_resampled = df.set_index('Date').resample(freq).apply(method).reset_index()
+
+    return df_resampled
+
+def merge_dataframes_on_date(*dfs):
+    """
+    Merges multiple dataframes on the 'Date' column.
+
+    Parameters:
+        *dfs: Multiple DataFrames to merge.
+
+    Returns:
+        pd.DataFrame: A single merged DataFrame on the 'Date' column.
+    """
+    # Preprocess each DataFrame before merging
+    processed_dfs = [preprocess_data(df.copy()) for df in dfs]
+
+    # Merge DataFrames on 'Date'
+    merged_df = processed_dfs[0]
+    for df in processed_dfs[1:]:
+        merged_df = pd.merge(merged_df, df, on='Date', how='inner')
+
+    return merged_df
+
+def filter_target_column(all_dfs, crisis_year, target_column):
+    """
+    Filters each DataFrame in the all_dfs list for a given 'target_column' and 'Date' column.
+
+    Parameters:
+        all_dfs (list): List of DataFrames to filter.
+        crisis_year (str): The year or key indicating which group of DataFrames to filter.
+        target_column (str): The column to filter along with 'Date'.
+
+    Returns:
+        None: Modifies the DataFrames in place.
+    """
+    # Loop through each DataFrame in the selected crisis_year
+    for i, df in enumerate(all_dfs[crisis_year]):
+        if target_column in df.columns:
+            # Filter the DataFrame to only include 'Date' and the target column
+            df_filtered = df[['Date', target_column]].copy()
+
+            # Optionally, assign it back to the list to modify in place
+            all_dfs[crisis_year][i] = df_filtered
+
+def plotting(
+        df: pd.DataFrame,
+        file_name: str = " ",
+        step_column: str = " ",
+        x_label: str = None,
+        y_label: str = None,
+        annotation: dict = None,
+        highlight: list = None
+):
+    """
+    适配Streamlit的绘图函数，支持事件标注和高亮周期
+
+    Parameters:
+        df (pd.DataFrame): 输入数据
+        file_name (str): 数据集文件名（用于标题）
+        step_column (str): 绘制为阶梯图的列名
+        x_label (str): X轴标签
+        y_label (str): Y轴标签
+        annotation (dict): 事件标注，格式为 {"Event Name": ("YYYY-MM-DD", with_line)}
+        highlight (list): 高亮周期，格式为 [(start_date, end_date, price_level, label, color), ...]
+
+    Returns:
+        matplotlib.figure.Figure: 绘制的图形对象
+    """
+    # 自动检测日期列
+    date_col = None
+    for col in df.columns:
+        if pd.api.types.is_datetime64_any_dtype(df[col]):
+            date_col = col
+            break
+
+    if date_col is None:
+        raise ValueError("未检测到日期列，请确保包含datetime类型列")
+
+    # 设置默认标题
+    title = f"{file_name.removesuffix('.csv')} - Time Series Analysis"
+
+    # 创建图形对象
+    fig, ax1 = plt.subplots(figsize=(15, 8))
+    colors = ['b', 'g', 'r', 'c', 'm', 'y', 'k']
+
+    # 绘制主数据
+    for i, column in enumerate(df.columns[df.columns != date_col]):
+        line_style = '-'
+        marker_style = 'o'
+
+        if step_column == column:
+            ax1.step(df[date_col], df[step_column], where='post',
+                     color=colors[i % len(colors)], linewidth=2,
+                     label=f'{step_column} (Step)')
+        else:
+            ax1.plot(df[date_col], df[column], linestyle=line_style, marker=marker_style,
+                     linewidth=2, markersize=6, color=colors[i % len(colors)], label=column)
+
+    # 绘制高亮周期（柱状图）
+    if highlight:
+        for start, end, price, label, color in highlight:
+            width = (end - start).days
+            middle = start + (end - start) / 2
+            ax1.bar(x=start, height=price, width=width, color=color, alpha=0.2, align='edge', label=label)
+            # 添加标签
+            ax1.annotate(label, xy=(middle, price), xytext=(middle, price + 200), arrowprops=dict(arrowstyle='->', color=color), color=color, fontsize=12, ha='center')
+
+    # 绘制事件标注
+    if annotation:
+        y_max = df.select_dtypes(include=['number']).max().max()  # 获取数据最大值
+        for event_name, (event_date, with_line) in annotation.items():
+            event_date = pd.to_datetime(event_date)
+            # 绘制垂直线（如果需要）
+            if with_line:
+                ax1.axvline(x=event_date, color='red', linestyle='-', linewidth=2, label=event_name)
+            # 添加事件标注
+            y_position = y_max - (200 if with_line else 100)
+            ax1.annotate(event_name, xy=(event_date, y_position), xytext=(event_date + pd.DateOffset(days=150), y_position + 200), fontsize=12, color='red', ha='center', arrowprops=dict(arrowstyle='->', color='blue' if not with_line else 'red'))
+
+    # 设置标签和标题
+    ax1.set_xlabel(x_label or date_col)
+    ax1.set_ylabel(y_label or "Value")
+    ax1.set_title(title)
+    plt.xticks(rotation=45)
+    plt.legend()
+    plt.tight_layout()
+
+    return fig
 
 def select_data():
     # 添加年份输入框
@@ -698,7 +673,6 @@ def select_data():
 
 
 def plot_correlation_matrix(df: pd.DataFrame, title: str):
-    genai.configure(api_key="AIzaSyCOdwdzuUplcSuVFa-mgEGRDsljGwEaYZk")
     # 排除非数值列
     numeric_columns = df.select_dtypes(include=['number']).columns.tolist()
     # 计算相关系数矩阵
@@ -768,7 +742,7 @@ def lasso_feature_selection(df, target_column='GDP', test_size=0.2, random_state
     plt.xticks(rotation=45)
     plt.show()
 
-    # return selected_features
+    return selected_features
 
 def generate_chart_summary(fig, prompt):
     genai.configure(api_key="AIzaSyCOdwdzuUplcSuVFa-mgEGRDsljGwEaYZk")
@@ -824,8 +798,6 @@ def current():
     else:
         st.warning(f"No data found for year {year_of_interest}")
 
-
-
 def merged_analysis():
     st.title('Financial Crisis Analysis Dashboard')
 
@@ -872,9 +844,7 @@ def merged_analysis():
                         plotting(df, file_name)
                         st.pyplot(plt)
                         plt.clf()
-                if selected_year ==2022:
-                    current()
-
+                if selected_year ==2022: current()
 
             # 2. 显示合并指标折线图
             if show_combined:
@@ -901,7 +871,6 @@ def merged_analysis():
                 st.header("Time Series Regression")
                 ts_model = TimeSeriesRegression(merged_df, lasso_feature_selection(merged_df, "GDP"), 'GDP', max_lag=6)
                 ts_model.run()
-
 
 def main():
     upload()
